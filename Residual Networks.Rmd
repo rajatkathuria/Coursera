@@ -1,0 +1,303 @@
+---
+title: "R Implementation of Convolutional (Residual) Networks for Image Recognition"
+subtitle: "Coursera Deep Learning Specialization (Course 4) - By Dr. Andrew Ng"
+---
+```{r}
+library(h5)
+library(abind)
+library(keras)
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("rhdf5")
+library(rhdf5)
+library(grid)
+library(keras)
+#install_keras()
+```
+
+
+```{r}
+identity_block <- function(X, f, filters, stage, block){
+
+  # Implementation of the identity block as defined in Figure 3
+  # 
+  # Arguments:
+  # X -- input tensor of shape (m, n_H_prev, n_W_prev, n_C_prev)
+  # f -- integer, specifying the shape of the middle CONV's window for the main path
+  # filters         -- python list of integers, defining the number of filters in the CONV layers of the main path
+  # stage -- integer, used to name the layers, depending on their position in the network
+  # block -- string/character, used to name the layers, depending on their position in the network
+  # 
+  # Returns:
+  # X -- output of the identity block, tensor of shape (n_H, n_W, n_C)
+
+
+  # defining name basis
+  conv_name_base = paste0('res', stage, block, '_branch')
+  bn_name_base = paste0('bn' , stage, block, '_branch')
+  
+  # Retrieve Filters
+  F1 <- filters[1]; F2 <- filters[2]; F3 <- filters[3]
+  
+  # Save the input value. You'll need this later to add back to the main path. 
+  X_shortcut = X
+  
+  # First component of main path
+  # X = Conv2D(filters = F1, kernel_size = (1, 1), strides = (1,1), padding = 'valid', name = conv_name_base + '2a', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2a')(X)
+  # X = Activation('relu')(X)
+  X <- layer_conv_2d(X, filters = F1, kernel_size = c(1, 1), strides = c(1, 1), padding = "valid", data_format = 'channels_last', name = paste0(conv_name_base, '2a'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2a')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  ### START CODE HERE ###
+  
+  # Second component of main path (≈3 lines)
+  # X = Conv2D(filters = F2, kernel_size = (f, f), strides = (1,1), padding = 'same', name = conv_name_base + '2b', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2b')(X)
+  # X = Activation('relu')(X)
+  X <- layer_conv_2d(X, filters = F2, kernel_size = c(f, f), strides = c(1, 1), padding = "same", data_format = 'channels_last', name = paste0(conv_name_base, '2b'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2b')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  # Third component of main path (≈2 lines)
+  # X = Conv2D(filters = F3, kernel_size = (1, 1), strides = (1,1), padding = 'valid', name = conv_name_base + '2c', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2c')(X)
+  X <- layer_conv_2d(X, filters = F3, kernel_size = c(1, 1), strides = c(1, 1), padding = "valid", data_format = 'channels_last', name = paste0(conv_name_base, '2c'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2c')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  
+  # Final step: Add shortcut value to main path, and pass it through a RELU activation (≈2 lines) https://keras.rstudio.com/reference/layer_add.html
+  # X = Add()([X, X_shortcut])
+  # X = Activation('relu')(X)
+  X <- layer_add(c(X, X_shortcut))
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  ### END CODE HERE ###
+  
+  return(X)
+}
+```
+
+```{r}
+convolutional_block <- function(X, f, filters, stage, block, s = 2){
+
+  #Implementation of the convolutional block as defined in Figure 4
+
+  # Arguments:
+  # X -- input tensor of shape (m, n_H_prev, n_W_prev, n_C_prev)
+  # f -- integer, specifying the shape of the middle CONV's window for the main path
+  # filters -- python list of integers, defining the number of filters in the CONV layers of the main path
+  # stage -- integer, used to name the layers, depending on their position in the network
+  # block -- string/character, used to name the layers, depending on their position in the network
+  # s -- Integer, specifying the stride to be used
+  # 
+  # Returns:
+  # X -- output of the convolutional block, tensor of shape (n_H, n_W, n_C)
+
+  # defining name basis
+  conv_name_base = paste0('res', stage, block, '_branch')
+  bn_name_base = paste0('bn' , stage, block, '_branch')
+  
+  # Retrieve Filters
+  F1 <- filters[1]; F2 <- filters[2]; F3 <- filters[3]
+  
+  # Save the input value
+  X_shortcut = X
+  
+  
+  ##### MAIN PATH #####
+  # First component of main path 
+  # X = Conv2D(F1, (1, 1), strides = (s,s), name = conv_name_base + '2a', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2a')(X)
+  # X = Activation('relu')(X)
+  X <- layer_conv_2d(X, filters = F1, kernel_size = c(1, 1), strides = c(s, s), padding = "valid", data_format = 'channels_last', name = paste0(conv_name_base, '2a'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2a')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  
+  ### START CODE HERE ###
+  
+  # Second component of main path (≈3 lines)
+  # X = Conv2D(filters = F2, kernel_size = (f, f), strides = (1,1), padding = 'same', name = conv_name_base + '2b', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2b')(X)
+  # X = Activation('relu')(X)
+  X <- layer_conv_2d(X, filters = F2, kernel_size = c(f, f), strides = c(1, 1), padding = "same", data_format = 'channels_last', name = paste0(conv_name_base, '2b'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2b')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  # Third component of main path (≈2 lines)
+  # X = Conv2D(filters = F3, kernel_size = (1, 1), strides = (1,1), padding = 'valid', name = conv_name_base + '2c', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = bn_name_base + '2c')(X)
+  X <- layer_conv_2d(X, filters = F3, kernel_size = c(1, 1), strides = c(1, 1), padding = "valid", data_format = 'channels_last', name = paste0(conv_name_base, '2c'), kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '2c')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  
+  
+  ##### SHORTCUT PATH #### (≈2 lines)
+  # X_shortcut = Conv2D(F3, (1, 1), strides = (s,s), name = conv_name_base + '1', kernel_initializer = glorot_uniform(seed=0))(X_shortcut)
+  # X_shortcut = BatchNormalization(axis = 3, name = bn_name_base + '1')(X_shortcut)
+  X_shortcut <- layer_conv_2d(X, filters = F3, kernel_size = c(1, 1), strides = c(s, s), padding = "valid", data_format = 'channels_last', name = paste0(conv_name_base, '1'), kernel_initializer = 'glorot_uniform')
+  X_shortcut <- layer_batch_normalization(X, axis = -1, name = paste0(bn_name_base, '1')) #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  
+  
+  # Final step: Add shortcut value to main path, and pass it through a RELU activation (≈2 lines)
+  # X = Add()([X, X_shortcut])
+  # X = Activation('relu')(X)
+  X <- layer_add(c(X, X_shortcut))
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  
+  ### END CODE HERE ###
+  
+  return(X)
+}
+```
+
+
+```{r}
+ResNet50 <- function(input_shape = c(64, 64, 3), classes = 6){
+  # 
+  # Implementation of the popular ResNet50 the following architecture:
+  # CONV2D -> BATCHNORM -> RELU -> MAXPOOL -> CONVBLOCK -> IDBLOCK*2 -> CONVBLOCK -> IDBLOCK*3
+  # -> CONVBLOCK -> IDBLOCK*5 -> CONVBLOCK -> IDBLOCK*2 -> AVGPOOL -> TOPLAYER
+  # 
+  # Arguments:
+  # input_shape -- shape of the images of the dataset
+  # classes -- integer, number of classes
+  # 
+  # Returns:
+  # model -- a Model() instance in Keras
+  # 
+  
+  # Define the input as a tensor with shape input_shape https://keras.rstudio.com/reference/keras_model.html
+  # X_input = Input(input_shape) #Python Syntax
+  X_input <- layer_input(shape = input_shape)
+  
+  # Zero-Padding https://keras.rstudio.com/reference/layer_zero_padding_2d.html
+  # X = ZeroPadding2D((3, 3))(X_input) #Python Syntax
+  X <- layer_zero_padding_2d(X_input, padding = c(3, 3), data_format = 'channels_last') #data_format is "channels_last": (batch, rows, cols, channels)
+  
+  
+  # Stage 1 https://keras.rstudio.com/reference/layer_conv_2d.html #?Seed setting analogus to Python
+  # X = Conv2D(64, (7, 7), strides = (2, 2), name = 'conv1', kernel_initializer = glorot_uniform(seed=0))(X)
+  # X = BatchNormalization(axis = 3, name = 'bn_conv1')(X)
+  # X = Activation('relu')(X)
+  # X = MaxPooling2D((3, 3), strides=(2, 2))(X)
+  X <- layer_conv_2d(X, filters = 64, kernel_size = c(7, 7), strides = c(2, 2), padding = "valid", data_format = 'channels_last', name = 'conv1', kernel_initializer = 'glorot_uniform')
+  X <- layer_batch_normalization(X, axis = -1, name = 'bn_conv1') #axis: Integer, the axis that should be normalized (typically the features axis). For instance, after a Conv2D layer with data_format="channels_last", set axis=-1 in BatchNormalization
+  X <- layer_activation(X, activation = 'relu') #https://keras.rstudio.com/reference/layer_activation.html
+  X <- layer_max_pooling_2d(X, pool_size = c(3, 3), strides = c(2, 2), padding = "valid", data_format = 'channels_last') # https://keras.rstudio.com/reference/layer_max_pooling_2d.html
+  
+  # Stage 2
+  X = convolutional_block(X, f = 3, filters = c(64, 64, 256), stage = 2, block='a', s = 1)
+  X = identity_block(X, 3, c(64, 64, 256), stage=2, block='b')
+  X = identity_block(X, 3, c(64, 64, 256), stage=2, block='c')
+  
+  ### START CODE HERE ###
+  
+  # Stage 3 (≈4 lines)
+  X = convolutional_block(X, f = 3, filters = c(128, 128, 512), stage = 3, block='a', s = 2)
+  X = identity_block(X, 3, c(128,128,512), stage=3, block='b')
+  X = identity_block(X, 3, c(128,128,512), stage=3, block='c')
+  X = identity_block(X, 3, c(128,128,512), stage=3, block='d')
+  
+  # Stage 4 (≈6 lines)
+  X = convolutional_block(X, f = 3, filters = c(256, 256, 1024), stage = 4, block='a', s = 2)
+  X = identity_block(X, 3, c(256, 256, 1024), stage=4, block='b')
+  X = identity_block(X, 3, c(256, 256, 1024), stage=4, block='c')
+  X = identity_block(X, 3, c(256, 256, 1024), stage=4, block='d')
+  X = identity_block(X, 3, c(256, 256, 1024), stage=4, block='e')
+  X = identity_block(X, 3, c(256, 256, 1024), stage=4, block='f')
+  
+  # Stage 5 (≈3 lines)
+  X = convolutional_block(X, f = 3, filters = c(512, 512, 2048), stage = 5, block='a', s = 2)
+  X = identity_block(X, 3, c(512, 512, 2048), stage=5, block='b')
+  X = identity_block(X, 3, c(512, 512, 2048), stage=5, block='c')
+  
+  # AVGPOOL (≈1 line). Use "X = AveragePooling2D(...)(X)" https://keras.rstudio.com/reference/layer_average_pooling_2d.html
+  # X = AveragePooling2D(pool_size=(2, 2), strides=None, padding='valid', data_format=None)(X)
+  X <- layer_average_pooling_2d(X, pool_size = c(2, 2), strides = NULL, padding = "valid", data_format = NULL)
+  
+  ### END CODE HERE ###
+  
+  # output layer https://keras.rstudio.com/reference/k_flatten.html #? https://keras.rstudio.com/reference/layer_flatten.html
+  # X = Flatten()(X)
+  # X = Dense(classes, activation='softmax', name='fc' + str(classes), kernel_initializer = glorot_uniform(seed=0))(X)
+  X <- layer_flatten(X) #k_flatten(X)
+  X <- layer_dense(X, units = classes, activation = 'softmax', kernel_initializer = "glorot_uniform", name = paste0('fc', classes))
+  
+  
+  # Create model https://keras.rstudio.com/reference/keras_model.html
+  #model = Model(inputs = X_input, outputs = X, name='ResNet50')
+  model <- keras_model(inputs = X_input, outputs = X)
+  
+  return(model)
+}
+
+```
+
+```{r}
+display.3Darray <- function(arr){
+  arr <- arr
+  r <- (arr[,,1])
+  g <- (arr[,,2])
+  b <- (arr[,,3])
+  
+  col <- rgb(r, g, b)
+  dim(col) <- dim(r)
+  
+  grid.raster(col, interpolate=FALSE)
+}
+```
+
+```{r}
+#Show contents of the dataset
+h5ls("Downloads/Resnets/datasets/train_signs.h5")
+train_set_x_orig = h5read("Downloads/Resnets/datasets/train_signs.h5", "/train_set_x") # your train set features
+train_set_y_orig = h5read("Downloads/Resnets/datasets/train_signs.h5", "/train_set_y") # your train set labels
+
+h5ls("Downloads/Resnets/datasets/test_signs.h5")
+test_set_x_orig = h5read("Downloads/Resnets/datasets/test_signs.h5", "/test_set_x") # your test set features
+test_set_y_orig = h5read("Downloads/Resnets/datasets/test_signs.h5", "/test_set_y") # your test set labels
+
+classes = h5read("Downloads/Resnets/datasets/test_signs.h5", "/list_classes") # the list of classes
+
+# Transpose Inputs to (m, Row, Col, Channels)
+X_train <- (aperm(train_set_x_orig, c(4,3,2,1)))/255
+X_test <- (aperm(test_set_x_orig, c(4,3,2,1)))/255
+
+# Reshape Output to categorical
+#train_set_y_orig = train_set_y_orig.reshape((1, train_set_y_orig.shape[0]))
+#test_set_y_orig = test_set_y_orig.reshape((1, test_set_y_orig.shape[0]))
+Y_train <- to_categorical(train_set_y_orig)
+Y_test <- to_categorical(test_set_y_orig)
+```
+
+```{r}
+#Validate
+display.3Darray(X_train[7,,,]) #dim: (channels=3,Col= 64,Row= 64,m= 1080)
+```
+
+
+```{r}
+# Define & Compile architecture
+model <- ResNet50(input_shape = c(64, 64, 3), classes = 6)
+model %>% compile(optimizer = 'adam', loss = 'categorical_crossentropy', metrics = c('accuracy')) #https://keras.rstudio.com/reference/compile.html
+
+#Train model
+model %>% fit(x = X_train, y = Y_train, batch_size = 32, epochs = 2) # https://keras.rstudio.com/reference/fit.html
+
+#Test Model
+model %>% evaluate(x = X_test, y = Y_test)
+
+#Predict Classes
+preds <- predict(model, x = X_test)
+```
+
+
+```{r}
+#Load Pretrained model
+model <- load_model_hdf5('./Downloads/Resnets/ResNet50.h5')
+model %>% evaluate(x = X_test, y = Y_test)
+preds <- predict(model, x = X_test)
+tmp <- cbind(test_set_y_orig, 'Prediction' = apply(preds,1,which.max) - 1)
+```
+
+
